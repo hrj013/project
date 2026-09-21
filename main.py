@@ -2,7 +2,6 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
-import json
 import requests
 
 # 1. 페이지 기본 설정
@@ -15,16 +14,32 @@ st.set_page_config(
 st.title("🎓 전국 시군구별 대학생 인구 비율 지도")
 st.markdown("대한민국 시군구별 인구 대비 대학생 비중(%)을 보여주는 단계구분도(Choropleth Map)입니다.")
 
-# 2. 데이터 및 GeoJSON 로드 함수
-@st.cache_data
+# 2. GeoJSON 로드 함수 (다중 백업 URL 적용)
+@st.cache_data(ttl=3600)
 def load_geojson():
-    # 대한민국 시군구 GeoJSON (오픈소스 행정구역 데이터)
-    url = "https://raw.githubusercontent.com/southkorea/southkorea-maps/master/kostat/2013/json/skorea_municipalities_2013_geo.json"
-    try:
-        response = requests.get(url)
-        return response.json()
-    except Exception:
-        return None
+    # 1차/2차 백업 GeoJSON URL 목록 (대한민국 시군구 행정구역)
+    urls = [
+        # 대한민국 시군구 GeoJSON (최신 행정구역 미러)
+        "https://raw.githubusercontent.com/southkorea/southkorea-maps/master/kostat/2013/json/skorea_municipalities_2013_geo.json",
+        # 대체 백업 URL (GADM 기반)
+        "https://raw.githubusercontent.com/valentin212/korea-geojson/master/kr-all-cities-provinces.json"
+    ]
+    
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+    }
+
+    for url in urls:
+        try:
+            response = requests.get(url, headers=headers, timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                if "features" in data and len(data["features"]) > 0:
+                    return data
+        except Exception:
+            continue
+            
+    return None
 
 @st.cache_data
 def load_sample_data(geojson_data):
@@ -38,8 +53,10 @@ def load_sample_data(geojson_data):
     np.random.seed(42)  # 재현 가능한 데이터
     
     for feature in features:
-        code = feature["properties"]["code"]
-        name = feature["properties"]["name"]
+        props = feature["properties"]
+        # GeoJSON 구조에 따라 코드/이름 키값 유연 처리
+        code = props.get("code") or props.get("SIG_CD") or props.get("id") or str(np.random.randint(10000, 99999))
+        name = props.get("name") or props.get("SIG_KOR_NM") or props.get("NL_NAME_2") or "지역"
         
         # 대학가 특성을 모사하기 위한 난수 생성 (3%~18% 사이 비율)
         college_ratio = np.round(np.random.beta(2, 5) * 20, 2)
@@ -52,8 +69,9 @@ def load_sample_data(geojson_data):
         
     return pd.DataFrame(records)
 
-# 3. 데이터 준비
-geojson = load_geojson()
+# 3. 데이터 준비 및 실행
+with st.spinner("지도 데이터를 불러오는 중입니다..."):
+    geojson = load_geojson()
 
 if geojson:
     df = load_sample_data(geojson)
@@ -76,12 +94,22 @@ if geojson:
     
     filtered_df = df[(df["college_ratio"] >= ratio_filter[0]) & (df["college_ratio"] <= ratio_filter[1])]
     
+    # Feature ID 매핑 키 자동 판별
+    sample_props = geojson["features"][0]["properties"]
+    if "code" in sample_props:
+        feature_key = "properties.code"
+    elif "SIG_CD" in sample_props:
+        feature_key = "properties.SIG_CD"
+    else:
+        feature_key = "properties.name"
+        df["code"] = df["name"]
+
     # 4. Plotly Express 단계구분도 작성
     fig = px.choropleth_mapbox(
         filtered_df,
         geojson=geojson,
         locations="code",
-        featureidkey="properties.code",
+        featureidkey=feature_key,
         color="college_ratio",
         color_continuous_scale=color_scale,
         range_color=(df["college_ratio"].min(), df["college_ratio"].max()),
@@ -118,4 +146,4 @@ if geojson:
             use_container_width=True
         )
 else:
-    st.error("GeoJSON 데이터를 불러오는 데 실패했습니다. 네트워크 연결을 확인해주세요.")
+    st.error("GeoJSON 데이터를 불러오지 못했습니다. 프로젝트 폴더에 GeoJSON 파일을 직접 넣는 가장 확실한 방법을 권장합니다.")
